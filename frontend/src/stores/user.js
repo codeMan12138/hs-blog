@@ -24,6 +24,10 @@ export const useUserStore = defineStore('user', {
 
     async register(userData) {
       const data = await authApi.register(userData)
+      await this.login({
+        username: userData.username,
+        password: userData.password
+      })
       return data
     },
 
@@ -36,9 +40,7 @@ export const useUserStore = defineStore('user', {
 
     async updateProfile(profileData) {
       await authApi.updateProfile(profileData)
-      if (profileData.email || profileData.bio) {
-        await this.getProfile()
-      }
+      await this.getProfile()
     },
 
     async changePassword(passwordData) {

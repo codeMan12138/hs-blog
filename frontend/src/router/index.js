@@ -79,6 +79,12 @@ const routes = [
     name: 'AdminProfile',
     component: () => import('@/views/admin/Profile.vue'),
     meta: { layout: 'AdminLayout', requiresAuth: true }
+  },
+  {
+    path: '/:pathMatch(.*)*',
+    name: 'NotFound',
+    component: () => import('@/views/front/NotFound.vue'),
+    meta: { layout: 'FrontLayout' }
   }
 ]
 
@@ -89,6 +95,12 @@ const router = createRouter({
 
 router.beforeEach((to, from, next) => {
   const userStore = useUserStore()
+  
+  // 已登录用户访问登录页，重定向到后台
+  if (to.path === '/login' && userStore.isLoggedIn) {
+    next('/admin')
+    return
+  }
   
   if (to.meta.requiresAuth && !userStore.isLoggedIn) {
     next('/login')
