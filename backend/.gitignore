@@ -16,6 +16,11 @@ lerna-debug.log*
 uploads/*
 !uploads/.gitkeep
 
+# Prisma
+prisma/dev.db
+prisma/dev.db-journal
+prisma/migrations
+
 # OS
 .DS_Store
 Thumbs.db

@@ -1,17 +1,30 @@
-const { pool } = require('../config/database');
+const { prisma } = require('../config/database');
 const { successResponse, errorResponse } = require('../utils/response');
 
 const getCategories = async (req, res) => {
   try {
-    const [categories] = await pool.execute(`
-      SELECT c.*, COUNT(p.id) as post_count
-      FROM categories c
-      LEFT JOIN posts p ON c.id = p.category_id AND p.status = 'published'
-      GROUP BY c.id
-      ORDER BY c.id
-    `);
+    const categories = await prisma.category.findMany({
+      include: {
+        _count: {
+          select: {
+            posts: {
+              where: { status: 'published' }
+            }
+          }
+        }
+      },
+      orderBy: { id: 'asc' }
+    });
 
-    successResponse(res, categories);
+    const result = categories.map(c => ({
+      id: c.id,
+      name: c.name,
+      description: c.description,
+      post_count: c._count.posts,
+      created_at: c.createdAt
+    }));
+
+    successResponse(res, result);
   } catch (error) {
     console.error('获取分类列表错误:', error);
     errorResponse(res, '获取分类列表失败', 500);
@@ -22,16 +35,15 @@ const getCategoryById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const [categories] = await pool.execute(
-      'SELECT * FROM categories WHERE id = ?',
-      [id]
-    );
+    const category = await prisma.category.findUnique({
+      where: { id: parseInt(id) }
+    });
 
-    if (categories.length === 0) {
+    if (!category) {
       return errorResponse(res, '分类不存在', 404);
     }
 
-    successResponse(res, categories[0]);
+    successResponse(res, category);
   } catch (error) {
     console.error('获取分类详情错误:', error);
     errorResponse(res, '获取分类详情失败', 500);
@@ -42,14 +54,13 @@ const createCategory = async (req, res) => {
   try {
     const { name, description } = req.body;
 
-    const [result] = await pool.execute(
-      'INSERT INTO categories (name, description) VALUES (?, ?)',
-      [name, description]
-    );
+    const category = await prisma.category.create({
+      data: { name, description }
+    });
 
-    successResponse(res, { id: result.insertId }, '创建成功');
+    successResponse(res, { id: category.id }, '创建成功');
   } catch (error) {
-    if (error.code === 'ER_DUP_ENTRY') {
+    if (error.code === 'P2002') {
       return errorResponse(res, '分类名称已存在');
     }
     console.error('创建分类错误:', error);
@@ -62,23 +73,22 @@ const updateCategory = async (req, res) => {
     const { id } = req.params;
     const { name, description } = req.body;
 
-    const [categories] = await pool.execute(
-      'SELECT * FROM categories WHERE id = ?',
-      [id]
-    );
+    const existing = await prisma.category.findUnique({
+      where: { id: parseInt(id) }
+    });
 
-    if (categories.length === 0) {
+    if (!existing) {
       return errorResponse(res, '分类不存在', 404);
     }
 
-    await pool.execute(
-      'UPDATE categories SET name = ?, description = ? WHERE id = ?',
-      [name, description, id]
-    );
+    await prisma.category.update({
+      where: { id: parseInt(id) },
+      data: { name, description }
+    });
 
     successResponse(res, null, '更新成功');
   } catch (error) {
-    if (error.code === 'ER_DUP_ENTRY') {
+    if (error.code === 'P2002') {
       return errorResponse(res, '分类名称已存在');
     }
     console.error('更新分类错误:', error);
@@ -90,16 +100,15 @@ const deleteCategory = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const [categories] = await pool.execute(
-      'SELECT * FROM categories WHERE id = ?',
-      [id]
-    );
+    const existing = await prisma.category.findUnique({
+      where: { id: parseInt(id) }
+    });
 
-    if (categories.length === 0) {
+    if (!existing) {
       return errorResponse(res, '分类不存在', 404);
     }
 
-    await pool.execute('DELETE FROM categories WHERE id = ?', [id]);
+    await prisma.category.delete({ where: { id: parseInt(id) } });
 
     successResponse(res, null, '删除成功');
   } catch (error) {
@@ -110,16 +119,27 @@ const deleteCategory = async (req, res) => {
 
 const getTags = async (req, res) => {
   try {
-    const [tags] = await pool.execute(`
-      SELECT t.*, COUNT(pt.post_id) as post_count
-      FROM tags t
-      LEFT JOIN post_tags pt ON t.id = pt.tag_id
-      LEFT JOIN posts p ON pt.post_id = p.id AND p.status = 'published'
-      GROUP BY t.id
-      ORDER BY t.id
-    `);
+    const tags = await prisma.tag.findMany({
+      include: {
+        _count: {
+          select: {
+            posts: {
+              where: { status: 'published' }
+            }
+          }
+        }
+      },
+      orderBy: { id: 'asc' }
+    });
 
-    successResponse(res, tags);
+    const result = tags.map(t => ({
+      id: t.id,
+      name: t.name,
+      post_count: t._count.posts,
+      created_at: t.createdAt
+    }));
+
+    successResponse(res, result);
   } catch (error) {
     console.error('获取标签列表错误:', error);
     errorResponse(res, '获取标签列表失败', 500);
@@ -130,14 +150,13 @@ const createTag = async (req, res) => {
   try {
     const { name } = req.body;
 
-    const [result] = await pool.execute(
-      'INSERT INTO tags (name) VALUES (?)',
-      [name]
-    );
+    const tag = await prisma.tag.create({
+      data: { name }
+    });
 
-    successResponse(res, { id: result.insertId }, '创建成功');
+    successResponse(res, { id: tag.id }, '创建成功');
   } catch (error) {
-    if (error.code === 'ER_DUP_ENTRY') {
+    if (error.code === 'P2002') {
       return errorResponse(res, '标签名称已存在');
     }
     console.error('创建标签错误:', error);
@@ -149,16 +168,15 @@ const deleteTag = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const [tags] = await pool.execute(
-      'SELECT * FROM tags WHERE id = ?',
-      [id]
-    );
+    const existing = await prisma.tag.findUnique({
+      where: { id: parseInt(id) }
+    });
 
-    if (tags.length === 0) {
+    if (!existing) {
       return errorResponse(res, '标签不存在', 404);
     }
 
-    await pool.execute('DELETE FROM tags WHERE id = ?', [id]);
+    await prisma.tag.delete({ where: { id: parseInt(id) } });
 
     successResponse(res, null, '删除成功');
   } catch (error) {

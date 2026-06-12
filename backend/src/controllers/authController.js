@@ -1,29 +1,31 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { pool } = require('../config/database');
+const { prisma } = require('../config/database');
 const { successResponse, errorResponse } = require('../utils/response');
 
 const register = async (req, res) => {
   try {
     const { username, password, email } = req.body;
 
-    const [existing] = await pool.execute(
-      'SELECT id FROM users WHERE username = ?',
-      [username]
-    );
+    const existing = await prisma.user.findUnique({
+      where: { username }
+    });
 
-    if (existing.length > 0) {
+    if (existing) {
       return errorResponse(res, '用户名已存在');
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const [result] = await pool.execute(
-      'INSERT INTO users (username, password, email) VALUES (?, ?, ?)',
-      [username, hashedPassword, email]
-    );
+    const user = await prisma.user.create({
+      data: {
+        username,
+        password: hashedPassword,
+        email
+      }
+    });
 
-    successResponse(res, { id: result.insertId, username }, '注册成功');
+    successResponse(res, { id: user.id, username: user.username }, '注册成功');
   } catch (error) {
     console.error('注册错误:', error);
     errorResponse(res, '注册失败', 500);
@@ -34,16 +36,14 @@ const login = async (req, res) => {
   try {
     const { username, password } = req.body;
 
-    const [users] = await pool.execute(
-      'SELECT * FROM users WHERE username = ?',
-      [username]
-    );
+    const user = await prisma.user.findUnique({
+      where: { username }
+    });
 
-    if (users.length === 0) {
+    if (!user) {
       return errorResponse(res, '用户名或密码错误');
     }
 
-    const user = users[0];
     const isValidPassword = await bcrypt.compare(password, user.password);
 
     if (!isValidPassword) {
@@ -51,7 +51,7 @@ const login = async (req, res) => {
     }
 
     const token = jwt.sign(
-      { id: user.id, username: user.username },
+      { id: user.id, username: user.username, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN }
     );
@@ -74,16 +74,23 @@ const login = async (req, res) => {
 
 const getProfile = async (req, res) => {
   try {
-    const [users] = await pool.execute(
-      'SELECT id, username, email, avatar, bio, created_at FROM users WHERE id = ?',
-      [req.user.id]
-    );
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: {
+        id: true,
+        username: true,
+        email: true,
+        avatar: true,
+        bio: true,
+        createdAt: true
+      }
+    });
 
-    if (users.length === 0) {
+    if (!user) {
       return errorResponse(res, '用户不存在', 404);
     }
 
-    successResponse(res, users[0]);
+    successResponse(res, user);
   } catch (error) {
     console.error('获取用户信息错误:', error);
     errorResponse(res, '获取用户信息失败', 500);
@@ -95,32 +102,19 @@ const updateProfile = async (req, res) => {
     const { email, bio } = req.body;
     const avatar = req.file ? `/uploads/${req.file.filename}` : null;
 
-    let updateFields = [];
-    let updateValues = [];
+    const data = {};
+    if (email !== undefined) data.email = email;
+    if (bio !== undefined) data.bio = bio;
+    if (avatar) data.avatar = avatar;
 
-    if (email !== undefined) {
-      updateFields.push('email = ?');
-      updateValues.push(email);
-    }
-    if (bio !== undefined) {
-      updateFields.push('bio = ?');
-      updateValues.push(bio);
-    }
-    if (avatar) {
-      updateFields.push('avatar = ?');
-      updateValues.push(avatar);
-    }
-
-    if (updateFields.length === 0) {
+    if (Object.keys(data).length === 0) {
       return errorResponse(res, '没有要更新的字段');
     }
 
-    updateValues.push(req.user.id);
-
-    await pool.execute(
-      `UPDATE users SET ${updateFields.join(', ')} WHERE id = ?`,
-      updateValues
-    );
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data
+    });
 
     successResponse(res, null, '更新成功');
   } catch (error) {
@@ -133,16 +127,15 @@ const changePassword = async (req, res) => {
   try {
     const { oldPassword, newPassword } = req.body;
 
-    const [users] = await pool.execute(
-      'SELECT password FROM users WHERE id = ?',
-      [req.user.id]
-    );
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id }
+    });
 
-    if (users.length === 0) {
+    if (!user) {
       return errorResponse(res, '用户不存在', 404);
     }
 
-    const isValidPassword = await bcrypt.compare(oldPassword, users[0].password);
+    const isValidPassword = await bcrypt.compare(oldPassword, user.password);
 
     if (!isValidPassword) {
       return errorResponse(res, '原密码错误');
@@ -150,10 +143,10 @@ const changePassword = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-    await pool.execute(
-      'UPDATE users SET password = ? WHERE id = ?',
-      [hashedPassword, req.user.id]
-    );
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data: { password: hashedPassword }
+    });
 
     successResponse(res, null, '密码修改成功');
   } catch (error) {

@@ -1,70 +1,75 @@
-const { pool } = require('../config/database');
+const { prisma } = require('../config/database');
 const { successResponse, errorResponse } = require('../utils/response');
 
 const getPosts = async (req, res) => {
   try {
     const { page = 1, limit = 10, category, tag, status, keyword } = req.query;
-    const offset = (page - 1) * limit;
+    const pageNum = parseInt(page);
+    const pageSize = parseInt(limit);
+    const skip = (pageNum - 1) * pageSize;
 
-    let whereConditions = [];
-    let queryParams = [];
+    const where = {};
 
     if (category) {
-      whereConditions.push('p.category_id = ?');
-      queryParams.push(category);
+      where.categoryId = parseInt(category);
     }
 
     if (tag) {
-      whereConditions.push('pt.tag_id = ?');
-      queryParams.push(tag);
+      where.tags = {
+        some: { id: parseInt(tag) }
+      };
     }
 
     if (status) {
-      whereConditions.push('p.status = ?');
-      queryParams.push(status);
+      where.status = status;
     } else {
-      whereConditions.push('p.status = "published"');
+      where.status = 'published';
     }
 
     if (keyword) {
-      whereConditions.push('(p.title LIKE ? OR p.summary LIKE ?)');
-      queryParams.push(`%${keyword}%`, `%${keyword}%`);
+      where.OR = [
+        { title: { contains: keyword } },
+        { summary: { contains: keyword } }
+      ];
     }
 
-    const whereClause = whereConditions.length > 0 
-      ? 'WHERE ' + whereConditions.join(' AND ') 
-      : '';
-
-    const [posts] = await pool.execute(`
-      SELECT p.*, c.name as category_name, u.username as author_name,
-        GROUP_CONCAT(t.name) as tags
-      FROM posts p
-      LEFT JOIN categories c ON p.category_id = c.id
-      LEFT JOIN users u ON p.author_id = u.id
-      LEFT JOIN post_tags pt ON p.id = pt.post_id
-      LEFT JOIN tags t ON pt.tag_id = t.id
-      ${whereClause}
-      GROUP BY p.id
-      ORDER BY p.created_at DESC
-      LIMIT ? OFFSET ?
-    `, [...queryParams, parseInt(limit), offset]);
-
-    const [countResult] = await pool.execute(`
-      SELECT COUNT(DISTINCT p.id) as total
-      FROM posts p
-      LEFT JOIN post_tags pt ON p.id = pt.post_id
-      ${whereClause}
-    `, queryParams);
+    const [posts, total] = await Promise.all([
+      prisma.post.findMany({
+        where,
+        include: {
+          category: { select: { name: true } },
+          author: { select: { username: true } },
+          tags: { select: { name: true } }
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: pageSize
+      }),
+      prisma.post.count({ where })
+    ]);
 
     successResponse(res, {
       posts: posts.map(post => ({
-        ...post,
-        tags: post.tags ? post.tags.split(',') : []
+        id: post.id,
+        title: post.title,
+        summary: post.summary,
+        content: post.content,
+        cover_image: post.coverImage,
+        author_id: post.authorId,
+        author_name: post.author?.username,
+        category_id: post.categoryId,
+        category_name: post.category?.name,
+        status: post.status,
+        views: post.views,
+        likes: post.likes,
+        tags: post.tags.map(t => t.name),
+        created_at: post.createdAt,
+        updated_at: post.updatedAt
       })),
       pagination: {
-        current: parseInt(page),
-        pageSize: parseInt(limit),
-        total: countResult[0].total
+        current: pageNum,
+        pageSize,
+        total
       }
     });
   } catch (error) {
@@ -77,27 +82,41 @@ const getPostById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const [posts] = await pool.execute(`
-      SELECT p.*, c.name as category_name, u.username as author_name,
-        GROUP_CONCAT(t.name) as tags
-      FROM posts p
-      LEFT JOIN categories c ON p.category_id = c.id
-      LEFT JOIN users u ON p.author_id = u.id
-      LEFT JOIN post_tags pt ON p.id = pt.post_id
-      LEFT JOIN tags t ON pt.tag_id = t.id
-      WHERE p.id = ?
-      GROUP BY p.id
-    `, [id]);
+    const post = await prisma.post.findUnique({
+      where: { id: parseInt(id) },
+      include: {
+        category: { select: { name: true } },
+        author: { select: { username: true } },
+        tags: { select: { name: true } }
+      }
+    });
 
-    if (posts.length === 0) {
+    if (!post) {
       return errorResponse(res, '博客不存在', 404);
     }
 
-    await pool.execute('UPDATE posts SET views = views + 1 WHERE id = ?', [id]);
+    // 浏览量 +1
+    await prisma.post.update({
+      where: { id: parseInt(id) },
+      data: { views: { increment: 1 } }
+    });
 
     successResponse(res, {
-      ...posts[0],
-      tags: posts[0].tags ? posts[0].tags.split(',') : []
+      id: post.id,
+      title: post.title,
+      summary: post.summary,
+      content: post.content,
+      cover_image: post.coverImage,
+      author_id: post.authorId,
+      author_name: post.author?.username,
+      category_id: post.categoryId,
+      category_name: post.category?.name,
+      status: post.status,
+      views: post.views + 1,
+      likes: post.likes,
+      tags: post.tags.map(t => t.name),
+      created_at: post.createdAt,
+      updated_at: post.updatedAt
     });
   } catch (error) {
     console.error('获取博客详情错误:', error);
@@ -110,33 +129,32 @@ const createPost = async (req, res) => {
     const { title, content, summary, categoryId, tags, status = 'draft' } = req.body;
     const coverImage = req.file ? `/uploads/${req.file.filename}` : null;
 
-    const [result] = await pool.execute(
-      'INSERT INTO posts (title, content, summary, cover_image, author_id, category_id, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [title, content, summary, coverImage, req.user.id, categoryId, status]
-    );
+    const postData = {
+      title,
+      content,
+      summary,
+      coverImage,
+      authorId: req.user.id,
+      status,
+      categoryId: categoryId ? parseInt(categoryId) : null
+    };
 
-    const postId = result.insertId;
-
+    // 处理标签关联
     if (tags && tags.length > 0) {
+      const tagConnections = [];
       for (const tagName of tags) {
-        const [tagResult] = await pool.execute(
-          'INSERT IGNORE INTO tags (name) VALUES (?)',
-          [tagName]
-        );
-
-        const [tagIdResult] = await pool.execute(
-          'SELECT id FROM tags WHERE name = ?',
-          [tagName]
-        );
-
-        await pool.execute(
-          'INSERT INTO post_tags (post_id, tag_id) VALUES (?, ?)',
-          [postId, tagIdResult[0].id]
-        );
+        let tag = await prisma.tag.findUnique({ where: { name: tagName } });
+        if (!tag) {
+          tag = await prisma.tag.create({ data: { name: tagName } });
+        }
+        tagConnections.push({ id: tag.id });
       }
+      postData.tags = { connect: tagConnections };
     }
 
-    successResponse(res, { id: postId }, '创建成功');
+    const post = await prisma.post.create({ data: postData });
+
+    successResponse(res, { id: post.id }, '创建成功');
   } catch (error) {
     console.error('创建博客错误:', error);
     errorResponse(res, '创建博客失败', 500);
@@ -146,77 +164,47 @@ const createPost = async (req, res) => {
 const updatePost = async (req, res) => {
   try {
     const { id } = req.params;
+    const postId = parseInt(id);
     const { title, content, summary, categoryId, tags, status } = req.body;
     const coverImage = req.file ? `/uploads/${req.file.filename}` : null;
 
-    const [posts] = await pool.execute(
-      'SELECT author_id FROM posts WHERE id = ?',
-      [id]
-    );
+    const existing = await prisma.post.findUnique({
+      where: { id: postId }
+    });
 
-    if (posts.length === 0) {
+    if (!existing) {
       return errorResponse(res, '博客不存在', 404);
     }
 
-    if (posts[0].author_id !== req.user.id) {
+    if (existing.authorId !== req.user.id) {
       return errorResponse(res, '无权修改此博客', 403);
     }
 
-    let updateFields = [];
-    let updateValues = [];
+    const postData = {};
+    if (title !== undefined) postData.title = title;
+    if (content !== undefined) postData.content = content;
+    if (summary !== undefined) postData.summary = summary;
+    if (coverImage) postData.coverImage = coverImage;
+    if (categoryId !== undefined) postData.categoryId = categoryId ? parseInt(categoryId) : null;
+    if (status !== undefined) postData.status = status;
 
-    if (title !== undefined) {
-      updateFields.push('title = ?');
-      updateValues.push(title);
-    }
-    if (content !== undefined) {
-      updateFields.push('content = ?');
-      updateValues.push(content);
-    }
-    if (summary !== undefined) {
-      updateFields.push('summary = ?');
-      updateValues.push(summary);
-    }
-    if (coverImage) {
-      updateFields.push('cover_image = ?');
-      updateValues.push(coverImage);
-    }
-    if (categoryId !== undefined) {
-      updateFields.push('category_id = ?');
-      updateValues.push(categoryId);
-    }
-    if (status !== undefined) {
-      updateFields.push('status = ?');
-      updateValues.push(status);
-    }
-
-    updateValues.push(id);
-
-    await pool.execute(
-      `UPDATE posts SET ${updateFields.join(', ')} WHERE id = ?`,
-      updateValues
-    );
-
+    // 处理标签更新
     if (tags !== undefined) {
-      await pool.execute('DELETE FROM post_tags WHERE post_id = ?', [id]);
-
+      const tagConnections = [];
       for (const tagName of tags) {
-        const [tagResult] = await pool.execute(
-          'INSERT IGNORE INTO tags (name) VALUES (?)',
-          [tagName]
-        );
-
-        const [tagIdResult] = await pool.execute(
-          'SELECT id FROM tags WHERE name = ?',
-          [tagName]
-        );
-
-        await pool.execute(
-          'INSERT INTO post_tags (post_id, tag_id) VALUES (?, ?)',
-          [id, tagIdResult[0].id]
-        );
+        let tag = await prisma.tag.findUnique({ where: { name: tagName } });
+        if (!tag) {
+          tag = await prisma.tag.create({ data: { name: tagName } });
+        }
+        tagConnections.push({ id: tag.id });
       }
+      postData.tags = { set: tagConnections };
     }
+
+    await prisma.post.update({
+      where: { id: postId },
+      data: postData
+    });
 
     successResponse(res, null, '更新成功');
   } catch (error) {
@@ -228,21 +216,21 @@ const updatePost = async (req, res) => {
 const deletePost = async (req, res) => {
   try {
     const { id } = req.params;
+    const postId = parseInt(id);
 
-    const [posts] = await pool.execute(
-      'SELECT author_id FROM posts WHERE id = ?',
-      [id]
-    );
+    const existing = await prisma.post.findUnique({
+      where: { id: postId }
+    });
 
-    if (posts.length === 0) {
+    if (!existing) {
       return errorResponse(res, '博客不存在', 404);
     }
 
-    if (posts[0].author_id !== req.user.id) {
+    if (existing.authorId !== req.user.id) {
       return errorResponse(res, '无权删除此博客', 403);
     }
 
-    await pool.execute('DELETE FROM posts WHERE id = ?', [id]);
+    await prisma.post.delete({ where: { id: postId } });
 
     successResponse(res, null, '删除成功');
   } catch (error) {
@@ -255,7 +243,10 @@ const likePost = async (req, res) => {
   try {
     const { id } = req.params;
 
-    await pool.execute('UPDATE posts SET likes = likes + 1 WHERE id = ?', [id]);
+    await prisma.post.update({
+      where: { id: parseInt(id) },
+      data: { likes: { increment: 1 } }
+    });
 
     successResponse(res, null, '点赞成功');
   } catch (error) {
@@ -266,24 +257,24 @@ const likePost = async (req, res) => {
 
 const getDashboardStats = async (req, res) => {
   try {
-    const [postCount] = await pool.execute('SELECT COUNT(*) as count FROM posts');
-    const [categoryCount] = await pool.execute('SELECT COUNT(*) as count FROM categories');
-    const [commentCount] = await pool.execute('SELECT COUNT(*) as count FROM comments');
-    const [totalViews] = await pool.execute('SELECT SUM(views) as total FROM posts');
-
-    const [recentPosts] = await pool.execute(`
-      SELECT id, title, status, created_at 
-      FROM posts 
-      ORDER BY created_at DESC 
-      LIMIT 5
-    `);
+    const [postCount, categoryCount, commentCount, viewSum, recentPosts] = await Promise.all([
+      prisma.post.count(),
+      prisma.category.count(),
+      prisma.comment.count(),
+      prisma.post.aggregate({ _sum: { views: true } }),
+      prisma.post.findMany({
+        select: { id: true, title: true, status: true, createdAt: true },
+        orderBy: { createdAt: 'desc' },
+        take: 5
+      })
+    ]);
 
     successResponse(res, {
       stats: {
-        posts: postCount[0].count,
-        categories: categoryCount[0].count,
-        comments: commentCount[0].count,
-        views: totalViews[0].total || 0
+        posts: postCount,
+        categories: categoryCount,
+        comments: commentCount,
+        views: viewSum._sum.views || 0
       },
       recentPosts
     });

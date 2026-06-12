@@ -3,7 +3,7 @@ const cors = require('cors');
 const path = require('path');
 require('dotenv').config();
 
-const { pool, initDB } = require('./config/database');
+const { prisma } = require('./config/database');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
 
 const app = express();
@@ -23,20 +23,14 @@ app.use(errorHandler);
 
 const PORT = process.env.PORT || 3000;
 
-const startServer = async () => {
-  try {
-    await initDB();
-    
-    app.listen(PORT, () => {
-      console.log(`服务器运行在 http://localhost:${PORT}`);
-      console.log(`API文档: http://localhost:${PORT}/api`);
-    });
-  } catch (error) {
-    console.error('服务器启动失败:', error);
-    process.exit(1);
-  }
-};
+app.listen(PORT, () => {
+  console.log(`服务器运行在 http://localhost:${PORT}`);
+  console.log(`API文档: http://localhost:${PORT}/api`);
+});
 
-startServer();
+// 优雅关闭时断开 Prisma 连接
+process.on('beforeExit', async () => {
+  await prisma.$disconnect();
+});
 
 module.exports = app;
